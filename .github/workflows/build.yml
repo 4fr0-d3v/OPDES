@@ -39,7 +39,7 @@ jobs:
 
       - name: Build executable
         run: |
-          pyinstaller --clean --noconfirm --onefile --name opdes ../../../src/main.py
+          pyinstaller --clean --noconfirm --onefile --name opdes ../../src/main.py
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
