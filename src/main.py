@@ -21,7 +21,8 @@ from bs4 import BeautifulSoup
 from tqdm import tqdm
 
 
-CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
+CONFIG_DIR = Path.home() / ".opdes"
+CONFIG_PATH = CONFIG_DIR / "config.json"
 
 DEFAULT_CONFIG = {
     "url": "https://onepace.net/es/watch",
@@ -60,6 +61,7 @@ def cargar_config():
 
 
 def guardar_config(config: dict):
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2, ensure_ascii=False)
 
@@ -489,9 +491,6 @@ def listar_disponibles():
     opciones = aplanar_items(temporadas)
 
     print("\nListado disponible:\n")
-    session = crear_sesion()
-    _ = session  # mantenido por coherencia con el resto del script
-
     for op in opciones:
         descargados, disponibles = contar_descargados_para_enlace(op["id"], op["url"], output_dir)
 
@@ -516,12 +515,6 @@ def procesar_url_pixeldrain(url: str, carpeta_base: Path, session: requests.Sess
     elif tipo == "list":
         data = pedir_json_resistente(f"/list/{item_id}", url)
         archivos = data.get("files", [])
-
-        print(
-            f"  [debug] lista {item_id}: "
-            f"file_count={data.get('file_count')} "
-            f"archivos_recibidos={len(archivos)}"
-        )
 
         for archivo in archivos:
             file_id = archivo.get("id")
@@ -605,18 +598,18 @@ def ejecutar_descarga():
 
 def imprimir_ayuda():
     print("Uso:")
-    print("  python main.py")
-    print("  python main.py --run")
-    print("  python main.py --list")
-    print("  python main.py --show_config")
-    print("  python main.py --set_url <url>")
-    print("  python main.py --set_output <ruta>")
+    print("  opdes")
+    print("  opdes --run")
+    print("  opdes --list")
+    print("  opdes --show_config")
+    print("  opdes --set_url <url>")
+    print("  opdes --set_output <ruta>")
     print("\nEjemplos:")
-    print("  python main.py --show_config")
-    print("  python main.py --set_url https://onepace.net/es/watch")
-    print("  python main.py --set_output ~/Downloads/OnePace")
-    print("  python main.py --list")
-    print("  python main.py --run")
+    print("  opdes --show_config")
+    print("  opdes --set_url https://onepace.net/es/watch")
+    print("  opdes --set_output ~/Downloads/OnePace")
+    print("  opdes --list")
+    print("  opdes --run")
 
 
 def main():
