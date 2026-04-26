@@ -1,0 +1,16 @@
+{
+  "name": "nyaa",
+  "base_url": "https://nyaa.si",
+  "search_path_template": "/?f=0&c=1_2&q=%s&p=%d",
+  "search_query": "one+pace",
+  "row_selector": "table tbody tr",
+  "fields": {
+    "title": "td:nth-child(2) a:last-child",
+    "seeders": "td:nth-child(6)",
+    "torrent_link": "td:nth-child(3) a[href^='/download/']",
+    "torrent_id": "/download/(\\d+)"
+  },
+  "validation": {
+    "required_in_title": "one pace"
+  }
+}
