@@ -32,7 +32,6 @@ DEFAULT_CONFIG = {
     "url": "https://onepace.net/es/watch",
     "output_dir": "descargas_pixeldrain",
     "metadata_dir": "",
-    "series_name": "One Pace",
     "quality": "max",
     "log_level": "error",
 }
@@ -101,6 +100,10 @@ def log_debug(msg: str, config: dict | None = None):
 
 def log_error(msg: str):
     print(f"[error] {msg}")
+
+
+def obtener_series_name_desde_output(output_dir: Path) -> str:
+    return output_dir.expanduser().resolve().name
 
 
 def mostrar_config():
@@ -199,6 +202,30 @@ def copiar_contenido_directorio(origen: Path, destino: Path):
             shutil.copy2(item, dest_item)
 
 
+def descargar_archivo_con_progreso(url: str, destino: Path, descripcion: str, headers: dict | None = None):
+    with requests.get(url, stream=True, timeout=120, headers=headers or HEADERS) as resp:
+        resp.raise_for_status()
+
+        total = None
+        content_length = resp.headers.get("Content-Length")
+        if content_length and content_length.isdigit():
+            total = int(content_length)
+
+        with open(destino, "wb") as f, tqdm(
+            total=total,
+            unit="B",
+            unit_scale=True,
+            unit_divisor=1024,
+            desc=descripcion,
+            ascii=False,
+            dynamic_ncols=True,
+        ) as pbar:
+            for chunk in resp.iter_content(chunk_size=CHUNK_SIZE):
+                if chunk:
+                    f.write(chunk)
+                    pbar.update(len(chunk))
+
+
 def sync_metadata():
     config = cargar_config()
     metadata_dir = pedir_metadata_dir_si_falta(config)
@@ -215,9 +242,12 @@ def sync_metadata():
         extract_dir = tmpdir_path / "repo"
 
         log_debug(f"Descargando ZIP del repo: {METADATA_REPO_ZIP_URL}", config)
-        r = requests.get(METADATA_REPO_ZIP_URL, timeout=120, headers=HEADERS)
-        r.raise_for_status()
-        zip_path.write_bytes(r.content)
+        descargar_archivo_con_progreso(
+            url=METADATA_REPO_ZIP_URL,
+            destino=zip_path,
+            descripcion="Sincronizando metadatos",
+            headers=HEADERS,
+        )
 
         log_debug(f"Extrayendo ZIP en: {extract_dir}", config)
         with zipfile.ZipFile(zip_path, "r") as zf:
@@ -304,9 +334,9 @@ def validar_configuracion(config: dict) -> bool:
 
     log_debug("Iniciando validación de configuración", config)
     log_debug(f"url configurada: {config.get('url')}", config)
-    log_debug(f"series_name configurado: {config.get('series_name')}", config)
     log_debug(f"quality configurada: {config.get('quality')}", config)
     log_debug(f"log_level configurado: {config.get('log_level')}", config)
+    log_debug(f"series_name derivado de output_dir: {obtener_series_name_desde_output(output_dir)}", config)
 
     ok_output = validar_directorio_salida(output_dir)
     ok_metadata = validar_directorio_metadatos(metadata_dir)
@@ -690,7 +720,7 @@ def filtrar_opciones(opciones: list[dict]) -> list[dict]:
 
 def pedir_carpeta_destino(config: dict) -> Path:
     default_dir = config.get("output_dir", DEFAULT_CONFIG["output_dir"])
-    entrada = input(f"\nCarpeta de destino (vacío = {default_dir}): ").strip()
+    entrada = input(f"\nCarpeta raíz de la serie (vacío = {default_dir}): ").strip()
     if not entrada:
         return Path(default_dir).expanduser()
     return Path(entrada).expanduser()
@@ -797,10 +827,9 @@ def parsear_nombre_descargado(nombre_archivo: str):
     }
 
 
-def asegurar_estructura_temporada(destino_base: Path, season_meta: dict, series_name: str) -> Path:
+def asegurar_estructura_temporada(destino_base: Path, season_meta: dict) -> Path:
     season_number = season_meta["season_number"]
-    carpeta_serie = destino_base / series_name
-    carpeta_temporada = carpeta_serie / f"Season {season_number}"
+    carpeta_temporada = destino_base / f"Season {season_number}"
 
     carpeta_temporada.mkdir(parents=True, exist_ok=True)
 
@@ -825,7 +854,7 @@ def asegurar_estructura_temporada(destino_base: Path, season_meta: dict, series_
     return carpeta_temporada
 
 
-def renombrar_y_copiar_nfo_segun_metadata(video_path: Path, destino_base: Path, indice_metadatos: dict, series_name: str, season_number: int) -> Path:
+def renombrar_y_copiar_nfo_segun_metadata(video_path: Path, destino_base: Path, indice_metadatos: dict, season_number: int) -> Path:
     log_debug(f"Procesando vídeo descargado: {video_path}")
     log_debug(f"season_number usada para metadatos: {season_number}")
 
@@ -850,7 +879,7 @@ def renombrar_y_copiar_nfo_segun_metadata(video_path: Path, destino_base: Path, 
         log_error(f"No encontré .nfo para Season {season_number} episodio {info['episode_in_arc']}")
         return video_path
 
-    carpeta_temporada = asegurar_estructura_temporada(destino_base, season_meta, series_name)
+    carpeta_temporada = asegurar_estructura_temporada(destino_base, season_meta)
     log_debug(f"Carpeta temporada asegurada: {carpeta_temporada}")
 
     nuevo_stem = ep_nfo_src.stem
@@ -874,7 +903,7 @@ def renombrar_y_copiar_nfo_segun_metadata(video_path: Path, destino_base: Path, 
     return nuevo_video
 
 
-def contar_descargados_para_enlace(item_id: str, url: str, output_dir: Path, season_number: int, indice_metadatos: dict | None = None, series_name: str = "One Pace"):
+def contar_descargados_para_enlace(item_id: str, url: str, output_dir: Path, season_number: int, indice_metadatos: dict | None = None):
     try:
         archivos = obtener_archivos_lista_pixeldrain(url)
     except Exception:
@@ -899,7 +928,7 @@ def contar_descargados_para_enlace(item_id: str, url: str, output_dir: Path, sea
                 if season_meta:
                     ep_nfo_src = season_meta["episodes"].get(info["episode_in_arc"])
                     if ep_nfo_src:
-                        posible = output_dir / series_name / f"Season {season_meta['season_number']}" / f"{ep_nfo_src.stem}{Path(nombre).suffix}"
+                        posible = output_dir / f"Season {season_meta['season_number']}" / f"{ep_nfo_src.stem}{Path(nombre).suffix}"
                         if posible.exists():
                             encontrado = True
 
@@ -923,13 +952,13 @@ def listar_disponibles():
     url = config.get("url", DEFAULT_CONFIG["url"])
     output_dir = Path(config.get("output_dir", DEFAULT_CONFIG["output_dir"])).expanduser()
     metadata_dir = obtener_metadata_dir_config(config)
-    series_name = config.get("series_name", DEFAULT_CONFIG["series_name"])
     quality_config = config.get("quality", "max").lower()
 
     indice_metadatos = construir_indice_metadatos(metadata_dir)
 
     print(f"Usando URL: {url}")
-    print(f"Destino por defecto: {output_dir}")
+    print(f"Raíz de serie: {output_dir}")
+    print(f"Nombre de serie: {obtener_series_name_desde_output(output_dir)}")
     print(f"Metadatos: {metadata_dir}")
     print(f"Calidad configurada: {quality_config}")
 
@@ -959,7 +988,6 @@ def listar_disponibles():
                 output_dir,
                 season_number=arc["season_number"],
                 indice_metadatos=indice_metadatos,
-                series_name=series_name,
             )
 
         estado = "?/?" if descargados is None else f"{descargados}/{total}"
@@ -994,7 +1022,7 @@ def procesar_url_pixeldrain(url: str, carpeta_base: Path, session: requests.Sess
     return descargados
 
 
-def descargar_desde_diccionario(items, carpeta_salida="descargas_pixeldrain", indice_metadatos=None, series_name="One Pace"):
+def descargar_desde_diccionario(items, carpeta_salida="descargas_pixeldrain", indice_metadatos=None):
     session = crear_sesion()
     resultados = []
     destino_base = Path(carpeta_salida)
@@ -1023,7 +1051,6 @@ def descargar_desde_diccionario(items, carpeta_salida="descargas_pixeldrain", in
                             video_path=ruta,
                             destino_base=destino_base,
                             indice_metadatos=indice_metadatos,
-                            series_name=series_name,
                             season_number=season_number,
                         )
                     rutas_finales.append(str(ruta_final))
@@ -1059,11 +1086,13 @@ def ejecutar_descarga():
 
     url = config.get("url", DEFAULT_CONFIG["url"])
     metadata_dir = obtener_metadata_dir_config(config)
-    series_name = config.get("series_name", DEFAULT_CONFIG["series_name"])
     quality_config = config.get("quality", "max").lower()
 
+    output_dir_cfg = Path(config.get("output_dir", DEFAULT_CONFIG["output_dir"])).expanduser()
+
     print(f"Usando URL: {url}")
-    print(f"Destino por defecto: {config.get('output_dir')}")
+    print(f"Raíz de serie: {output_dir_cfg}")
+    print(f"Nombre de serie: {obtener_series_name_desde_output(output_dir_cfg)}")
     print(f"Metadatos: {metadata_dir}")
     print(f"Calidad configurada: {quality_config}")
 
@@ -1112,13 +1141,12 @@ def ejecutar_descarga():
     items_filtrados = reconstruir_items_segun_calidad(agrupadas_con_enlaces, quality_config)
 
     print(f"\nSe van a procesar {len(items_filtrados)} temporada(s).")
-    print(f"Destino: {carpeta_destino.resolve()}")
+    print(f"Destino raíz de la serie: {carpeta_destino.resolve()}")
 
     resultados = descargar_desde_diccionario(
         items_filtrados,
         carpeta_destino,
         indice_metadatos=indice_metadatos,
-        series_name=series_name,
     )
 
     print("\nResumen:")
@@ -1134,14 +1162,14 @@ def imprimir_ayuda():
     print("  opdes --sync_metadata")
     print("  opdes --show_config")
     print("  opdes --set_url <url>")
-    print("  opdes --set_output <ruta>")
+    print("  opdes --set_output <ruta_raiz_serie>")
     print("  opdes --set_metadata <ruta>")
     print("  opdes --set_quality <max|480p|720p|1080p>")
     print("  opdes --set_log_level <error|debug>")
     print("\nEjemplos:")
     print("  opdes --show_config")
     print("  opdes --set_url https://onepace.net/es/watch")
-    print("  opdes --set_output ~/Downloads/OnePace")
+    print('  opdes --set_output "/media/Series/One Pace"')
     print("  opdes --set_metadata /ruta/a/metadatos")
     print("  opdes --sync_metadata")
     print("  opdes --set_quality max")
