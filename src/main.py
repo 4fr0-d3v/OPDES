@@ -4,8 +4,10 @@ import json
 import re
 import shutil
 import sys
+import tempfile
 import time
 import xml.etree.ElementTree as ET
+import zipfile
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -29,8 +31,8 @@ CONFIG_PATH = CONFIG_DIR / "config.json"
 DEFAULT_CONFIG = {
     "url": "https://onepace.net/es/watch",
     "output_dir": "descargas_pixeldrain",
-    "metadata_dir": "../one-pace-jellyfin-master/One Pace",
-    "series_name": "OnePiece",
+    "metadata_dir": "",
+    "series_name": "One Pace",
     "quality": "max",
     "log_level": "error",
 }
@@ -52,6 +54,9 @@ LOG_LEVELS = {
     "error": 0,
     "debug": 1,
 }
+
+METADATA_REPO_ZIP_URL = "https://github.com/4fr0-d3v/OPDES/archive/refs/heads/main.zip"
+METADATA_SOURCE_SUFFIX = "one-pace-jellyfin-master/One Pace"
 
 
 def cargar_config():
@@ -158,6 +163,83 @@ def set_log_level(valor: str):
     print(f"Guardado en: {CONFIG_PATH}")
 
 
+def obtener_metadata_dir_config(config: dict) -> Path | None:
+    raw = str(config.get("metadata_dir", "")).strip()
+    if not raw:
+        return None
+    return Path(raw).expanduser()
+
+
+def pedir_metadata_dir_si_falta(config: dict) -> Path | None:
+    metadata_dir = obtener_metadata_dir_config(config)
+    if metadata_dir is not None:
+        return metadata_dir
+
+    ruta = input("No hay metadata_dir configurado. Indica dónde quieres guardar los metadatos: ").strip()
+    if not ruta:
+        log_error("No se indicó ninguna ruta para metadata_dir.")
+        return None
+
+    metadata_dir = Path(ruta).expanduser()
+    config["metadata_dir"] = str(metadata_dir)
+    guardar_config(config)
+    print(f"[OK] metadata_dir = {metadata_dir}")
+    print(f"Guardado en: {CONFIG_PATH}")
+    return metadata_dir
+
+
+def copiar_contenido_directorio(origen: Path, destino: Path):
+    destino.mkdir(parents=True, exist_ok=True)
+
+    for item in origen.iterdir():
+        dest_item = destino / item.name
+        if item.is_dir():
+            shutil.copytree(item, dest_item, dirs_exist_ok=True)
+        else:
+            shutil.copy2(item, dest_item)
+
+
+def sync_metadata():
+    config = cargar_config()
+    metadata_dir = pedir_metadata_dir_si_falta(config)
+    if metadata_dir is None:
+        raise SystemExit(1)
+
+    metadata_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"Descargando metadatos en: {metadata_dir}")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir_path = Path(tmpdir)
+        zip_path = tmpdir_path / "repo.zip"
+        extract_dir = tmpdir_path / "repo"
+
+        log_debug(f"Descargando ZIP del repo: {METADATA_REPO_ZIP_URL}", config)
+        r = requests.get(METADATA_REPO_ZIP_URL, timeout=120, headers=HEADERS)
+        r.raise_for_status()
+        zip_path.write_bytes(r.content)
+
+        log_debug(f"Extrayendo ZIP en: {extract_dir}", config)
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            zf.extractall(extract_dir)
+
+        source_dir = None
+        for candidate in extract_dir.rglob("One Pace"):
+            candidate_str = candidate.as_posix()
+            if candidate_str.endswith(METADATA_SOURCE_SUFFIX):
+                source_dir = candidate
+                break
+
+        if source_dir is None or not source_dir.exists():
+            log_error("No se encontró la carpeta de metadatos dentro del repositorio descargado.")
+            raise SystemExit(1)
+
+        log_debug(f"Carpeta origen de metadatos encontrada: {source_dir}", config)
+        copiar_contenido_directorio(source_dir, metadata_dir)
+
+    print(f"[OK] Metadatos sincronizados en: {metadata_dir}")
+
+
 def validar_directorio_salida(output_dir: Path) -> bool:
     log_debug(f"Comprobando output_dir: {output_dir}")
 
@@ -179,8 +261,12 @@ def validar_directorio_salida(output_dir: Path) -> bool:
     return True
 
 
-def validar_directorio_metadatos(metadata_dir: Path) -> bool:
+def validar_directorio_metadatos(metadata_dir: Path | None) -> bool:
     log_debug(f"Comprobando metadata_dir: {metadata_dir}")
+
+    if metadata_dir is None:
+        log_error("metadata_dir no está configurado.")
+        return False
 
     if not metadata_dir.exists():
         log_error(f"metadata_dir no existe, no se creará automáticamente: {metadata_dir}")
@@ -214,7 +300,7 @@ def validar_directorio_metadatos(metadata_dir: Path) -> bool:
 
 def validar_configuracion(config: dict) -> bool:
     output_dir = Path(config.get("output_dir", DEFAULT_CONFIG["output_dir"])).expanduser()
-    metadata_dir = Path(config.get("metadata_dir", DEFAULT_CONFIG["metadata_dir"])).expanduser()
+    metadata_dir = obtener_metadata_dir_config(config)
 
     log_debug("Iniciando validación de configuración", config)
     log_debug(f"url configurada: {config.get('url')}", config)
@@ -836,7 +922,7 @@ def listar_disponibles():
 
     url = config.get("url", DEFAULT_CONFIG["url"])
     output_dir = Path(config.get("output_dir", DEFAULT_CONFIG["output_dir"])).expanduser()
-    metadata_dir = Path(config.get("metadata_dir", DEFAULT_CONFIG["metadata_dir"])).expanduser()
+    metadata_dir = obtener_metadata_dir_config(config)
     series_name = config.get("series_name", DEFAULT_CONFIG["series_name"])
     quality_config = config.get("quality", "max").lower()
 
@@ -972,7 +1058,7 @@ def ejecutar_descarga():
         raise SystemExit(1)
 
     url = config.get("url", DEFAULT_CONFIG["url"])
-    metadata_dir = Path(config.get("metadata_dir", DEFAULT_CONFIG["metadata_dir"])).expanduser()
+    metadata_dir = obtener_metadata_dir_config(config)
     series_name = config.get("series_name", DEFAULT_CONFIG["series_name"])
     quality_config = config.get("quality", "max").lower()
 
@@ -1045,6 +1131,7 @@ def imprimir_ayuda():
     print("  opdes --run")
     print("  opdes --list")
     print("  opdes --check")
+    print("  opdes --sync_metadata")
     print("  opdes --show_config")
     print("  opdes --set_url <url>")
     print("  opdes --set_output <ruta>")
@@ -1055,7 +1142,8 @@ def imprimir_ayuda():
     print("  opdes --show_config")
     print("  opdes --set_url https://onepace.net/es/watch")
     print("  opdes --set_output ~/Downloads/OnePace")
-    print("  opdes --set_metadata ./one-pace-jellyfin-master/One Pace")
+    print("  opdes --set_metadata /ruta/a/metadatos")
+    print("  opdes --sync_metadata")
     print("  opdes --set_quality max")
     print("  opdes --set_quality 720p")
     print("  opdes --set_log_level error")
@@ -1114,6 +1202,10 @@ def main():
             print("Falta el valor para --set_log_level")
             return
         set_log_level(args[idx + 1])
+        return
+
+    if "--sync_metadata" in args:
+        sync_metadata()
         return
 
     if "--check" in args:
