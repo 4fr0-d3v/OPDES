@@ -211,15 +211,22 @@ def descargar_archivo_con_progreso(url: str, destino: Path, descripcion: str, he
         if content_length and content_length.isdigit():
             total = int(content_length)
 
+        bar_format_known = "{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]"
+        bar_format_unknown = "{l_bar}{bar}| {n_fmt} [{elapsed}, {rate_fmt}]"
+
         with open(destino, "wb") as f, tqdm(
-            total=total,
+            total=total if total is not None else 0,
             unit="B",
             unit_scale=True,
             unit_divisor=1024,
             desc=descripcion,
             ascii=False,
             dynamic_ncols=True,
+            bar_format=bar_format_known if total is not None else bar_format_unknown,
         ) as pbar:
+            if total is None:
+                pbar.total = None
+
             for chunk in resp.iter_content(chunk_size=CHUNK_SIZE):
                 if chunk:
                     f.write(chunk)
@@ -299,7 +306,10 @@ def validar_directorio_metadatos(metadata_dir: Path | None) -> bool:
         return False
 
     if not metadata_dir.exists():
-        log_error(f"metadata_dir no existe, no se creará automáticamente: {metadata_dir}")
+        log_error(
+            f"metadata_dir no existe todavía: {metadata_dir}. "
+            f"Ejecuta --sync_metadata para crearlo y descargar los metadatos."
+        )
         return False
 
     if not metadata_dir.is_dir():
@@ -310,7 +320,10 @@ def validar_directorio_metadatos(metadata_dir: Path | None) -> bool:
     log_debug(f"Temporadas encontradas en metadata_dir: {len(seasons)}")
 
     if not seasons:
-        log_error(f"No se encontraron carpetas 'Season *' dentro de: {metadata_dir}")
+        log_error(
+            f"No se encontraron carpetas 'Season *' dentro de: {metadata_dir}. "
+            f"Ejecuta --sync_metadata para poblar los metadatos."
+        )
         return False
 
     seasons_con_nfo = 0
@@ -321,7 +334,10 @@ def validar_directorio_metadatos(metadata_dir: Path | None) -> bool:
             seasons_con_nfo += 1
 
     if seasons_con_nfo == 0:
-        log_error(f"No se encontró ningún season.nfo válido dentro de: {metadata_dir}")
+        log_error(
+            f"No se encontró ningún season.nfo válido dentro de: {metadata_dir}. "
+            f"Ejecuta --sync_metadata para poblar los metadatos."
+        )
         return False
 
     log_debug(f"metadata_dir OK: {metadata_dir} | temporadas con season.nfo: {seasons_con_nfo}")
@@ -499,6 +515,48 @@ def pedir_json_resistente(path: str, url_original: str, max_intentos: int = MAX_
     raise RuntimeError(f"Falló la petición JSON tras varios intentos: {ultimo_error}")
 
 
+def obtener_ruta_final_esperada(
+    nombre_archivo: str,
+    destino_base: Path,
+    indice_metadatos: dict | None,
+    season_number: int | None,
+) -> Path | None:
+    if not indice_metadatos or season_number is None:
+        return None
+
+    info = parsear_nombre_descargado(nombre_archivo)
+    if not info:
+        return None
+
+    season_meta = indice_metadatos.get(season_number)
+    if not season_meta:
+        return None
+
+    ep_nfo_src = season_meta["episodes"].get(info["episode_in_arc"])
+    if not ep_nfo_src:
+        return None
+
+    carpeta_temporada = destino_base / f"Season {season_meta['season_number']}"
+    return carpeta_temporada / f"{ep_nfo_src.stem}{Path(nombre_archivo).suffix}"
+
+
+def archivo_ya_existe_en_destino_final(
+    nombre_archivo: str,
+    destino_base: Path,
+    indice_metadatos: dict | None,
+    season_number: int | None,
+) -> Path | None:
+    ruta_final = obtener_ruta_final_esperada(
+        nombre_archivo=nombre_archivo,
+        destino_base=destino_base,
+        indice_metadatos=indice_metadatos,
+        season_number=season_number,
+    )
+    if ruta_final and ruta_final.exists():
+        return ruta_final
+    return None
+
+
 def descargar_archivo_reanudable(
     file_id: str,
     nombre_archivo: str,
@@ -511,7 +569,7 @@ def descargar_archivo_reanudable(
     temp = destino.with_suffix(destino.suffix + ".part")
 
     if destino.exists():
-        log_debug(f"Archivo ya existe, se omite: {destino}")
+        log_debug(f"Archivo ya existe en _tmp, se omite: {destino}")
         return destino
 
     ultimo_error = None
@@ -891,7 +949,7 @@ def renombrar_y_copiar_nfo_segun_metadata(video_path: Path, destino_base: Path, 
 
     if video_path.resolve() != nuevo_video.resolve():
         if nuevo_video.exists():
-            log_error(f"Ya existe destino de vídeo y no se sobrescribirá: {nuevo_video}")
+            log_debug(f"El vídeo final ya existía, se conserva: {nuevo_video}")
         else:
             shutil.move(str(video_path), str(nuevo_video))
             log_debug(f"Vídeo movido a: {nuevo_video}")
@@ -941,6 +999,22 @@ def contar_descargados_para_enlace(item_id: str, url: str, output_dir: Path, sea
             descargados += 1
 
     return descargados, disponibles
+
+
+def limpiar_ds_store(base_dir: Path):
+    for ds_store in base_dir.rglob(".DS_Store"):
+        try:
+            ds_store.unlink()
+        except Exception:
+            pass
+
+
+def limpiar_temporales_si_ok(base_dir: Path):
+    tmp_dir = base_dir / "_tmp"
+    if tmp_dir.exists() and tmp_dir.is_dir():
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    limpiar_ds_store(base_dir)
 
 
 def listar_disponibles():
@@ -996,13 +1070,32 @@ def listar_disponibles():
         print(f"{arc['season_number']}. {arc['id']} | disponible: {disponibles_txt} | elegida: {elegida_quality} | {estado}")
 
 
-def procesar_url_pixeldrain(url: str, carpeta_base: Path, session: requests.Session):
+def procesar_url_pixeldrain(
+    url: str,
+    carpeta_base: Path,
+    session: requests.Session,
+    destino_base: Path,
+    indice_metadatos: dict | None = None,
+    season_number: int | None = None,
+):
     tipo, item_id = extraer_tipo_e_id(url)
     descargados = []
 
     if tipo == "file":
         info = pedir_json_resistente(f"/file/{item_id}/info", url)
         nombre = info.get("name") or f"{item_id}.bin"
+
+        ruta_final_existente = archivo_ya_existe_en_destino_final(
+            nombre_archivo=nombre,
+            destino_base=destino_base,
+            indice_metadatos=indice_metadatos,
+            season_number=season_number,
+        )
+        if ruta_final_existente:
+            log_debug(f"Ya existe archivo final, se omite descarga: {ruta_final_existente}")
+            descargados.append(ruta_final_existente)
+            return descargados
+
         ruta = descargar_archivo_reanudable(item_id, nombre, carpeta_base, session, url)
         descargados.append(ruta)
 
@@ -1016,6 +1109,18 @@ def procesar_url_pixeldrain(url: str, carpeta_base: Path, session: requests.Sess
                 continue
 
             nombre = archivo.get("name") or f"{file_id}.bin"
+
+            ruta_final_existente = archivo_ya_existe_en_destino_final(
+                nombre_archivo=nombre,
+                destino_base=destino_base,
+                indice_metadatos=indice_metadatos,
+                season_number=season_number,
+            )
+            if ruta_final_existente:
+                log_debug(f"Ya existe archivo final, se omite descarga: {ruta_final_existente}")
+                descargados.append(ruta_final_existente)
+                continue
+
             ruta = descargar_archivo_reanudable(file_id, nombre, carpeta_base, session, url)
             descargados.append(ruta)
 
@@ -1026,6 +1131,7 @@ def descargar_desde_diccionario(items, carpeta_salida="descargas_pixeldrain", in
     session = crear_sesion()
     resultados = []
     destino_base = Path(carpeta_salida)
+    hubo_error = False
 
     for item in items:
         item_id = item.get("id", "sin_id")
@@ -1041,18 +1147,38 @@ def descargar_desde_diccionario(items, carpeta_salida="descargas_pixeldrain", in
 
             try:
                 print(f"\nDescargando: {item_id} | {texto}")
-                rutas_descargadas = procesar_url_pixeldrain(url, carpeta_item_temporal, session)
+                rutas_descargadas = procesar_url_pixeldrain(
+                    url=url,
+                    carpeta_base=carpeta_item_temporal,
+                    session=session,
+                    destino_base=destino_base,
+                    indice_metadatos=indice_metadatos,
+                    season_number=season_number,
+                )
 
                 rutas_finales = []
                 for ruta in rutas_descargadas:
-                    ruta_final = ruta
+                    ruta_path = Path(ruta)
+
                     if indice_metadatos and season_number is not None:
-                        ruta_final = renombrar_y_copiar_nfo_segun_metadata(
-                            video_path=ruta,
-                            destino_base=destino_base,
-                            indice_metadatos=indice_metadatos,
-                            season_number=season_number,
-                        )
+                        try:
+                            ruta_path.relative_to(destino_base)
+                            ya_esta_en_destino_final = ruta_path.parent.name.startswith("Season ")
+                        except ValueError:
+                            ya_esta_en_destino_final = False
+
+                        if not ya_esta_en_destino_final:
+                            ruta_final = renombrar_y_copiar_nfo_segun_metadata(
+                                video_path=ruta_path,
+                                destino_base=destino_base,
+                                indice_metadatos=indice_metadatos,
+                                season_number=season_number,
+                            )
+                        else:
+                            ruta_final = ruta_path
+                    else:
+                        ruta_final = ruta_path
+
                     rutas_finales.append(str(ruta_final))
 
                 resultados.append({
@@ -1065,6 +1191,7 @@ def descargar_desde_diccionario(items, carpeta_salida="descargas_pixeldrain", in
                 })
                 print(f"[OK] {item_id} -> {len(rutas_finales)} archivo(s)")
             except Exception as e:
+                hubo_error = True
                 resultados.append({
                     "id": item_id,
                     "season_number": season_number,
@@ -1074,6 +1201,9 @@ def descargar_desde_diccionario(items, carpeta_salida="descargas_pixeldrain", in
                     "error": str(e),
                 })
                 log_error(f"{item_id} -> {e}")
+
+    if not hubo_error:
+        limpiar_temporales_si_ok(destino_base)
 
     return resultados
 
