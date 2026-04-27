@@ -1,10 +1,13 @@
 name: Build opdes
- 
+
 on:
   workflow_dispatch:
   push:
     tags:
       - "v*"
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -14,18 +17,30 @@ jobs:
           - os: windows-latest
             artifact_name: opdes-windows
             executable: opdes.exe
+            release_file: opdes-${{ github.ref_name }}-windows.exe
           - os: macos-latest
             artifact_name: opdes-macos
             executable: opdes
+            release_file: opdes-${{ github.ref_name }}-macos
           - os: ubuntu-latest
             artifact_name: opdes-linux
             executable: opdes
+            release_file: opdes-${{ github.ref_name }}-linux
 
     runs-on: ${{ matrix.os }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Show revision
+        shell: bash
+        run: |
+          git rev-parse HEAD
+          git log -1 --oneline
+          git describe --tags --always
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -33,17 +48,43 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
+        shell: bash
         run: |
           python -m pip install --upgrade pip
           pip install pyinstaller requests beautifulsoup4 tqdm urllib3
 
       - name: Build executable
+        shell: bash
         run: |
           pyinstaller --clean --noconfirm --onefile --name opdes src/main.py
+
+      - name: Rename binary
+        shell: bash
+        run: |
+          mkdir release
+          cp "dist/${{ matrix.executable }}" "release/${{ matrix.release_file }}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
-          path: dist/${{ matrix.executable }}
+          path: release/${{ matrix.release_file }}
 
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/opdes-windows/*
+            artifacts/opdes-macos/*
+            artifacts/opdes-linux/*
